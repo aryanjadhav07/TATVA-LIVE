@@ -168,29 +168,20 @@ def synthesize_rl(
     target_fidelity = 0.999999 if n_qubits >= 2 else 0.999
 
     try:
-        from tatva_synthesize import _worker_dqn, _worker_ppo, decide_winner
+        from tatva_synthesize import decide_winner
+        from dqn_synthesize import run_dqn_synthesis
+        from ppo_synthesize import run_ppo_synthesis
     except ImportError as e:
-        logger.error(f"[RL Inference] tatva_synthesize import failed: {e}")
+        logger.error(f"[RL Inference] tatva_synthesize/synthesizer import failed: {e}")
         return _fallback_synthesis(target_sv, n_qubits)
 
-    # Run DQN and PPO in parallel processes with isolated stdout
-    dqn_res, ppo_res = None, None
+    # Run DQN and PPO directly in-process to avoid multiprocessing fork deadlocks and high memory consumption under Gunicorn on Linux/Render
     try:
-        with ProcessPoolExecutor(max_workers=2) as executor:
-            fut_dqn = executor.submit(_worker_dqn, target_sv, n_qubits, budget, target_fidelity)
-            fut_ppo = executor.submit(_worker_ppo, target_sv, n_qubits, budget, target_fidelity)
-            dqn_res, dqn_log = fut_dqn.result(timeout=300)
-            ppo_res, ppo_log = fut_ppo.result(timeout=300)
+        dqn_res = run_dqn_synthesis(target_sv, n_qubits, budget, target_fidelity)
+        ppo_res = run_ppo_synthesis(target_sv, n_qubits, budget, target_fidelity)
     except Exception as e:
-        logger.warning(f"[RL Inference] ProcessPoolExecutor run encountered: {e}. Running directly.")
-        try:
-            from dqn_synthesize import run_dqn_synthesis
-            from ppo_synthesize import run_ppo_synthesis
-            dqn_res = run_dqn_synthesis(target_sv, n_qubits, budget, target_fidelity)
-            ppo_res = run_ppo_synthesis(target_sv, n_qubits, budget, target_fidelity)
-        except Exception as inner_e:
-            logger.error(f"[RL Inference] Direct synthesis failed: {inner_e}")
-            return {'success': False, 'error': str(inner_e)}
+        logger.error(f"[RL Inference] In-process synthesis failed: {e}")
+        return _fallback_synthesis(target_sv, n_qubits)
 
     # Decide authoritative winner via 5-priority cascade
     winner_str, win_reason, win_res = decide_winner(dqn_res, ppo_res, target_fidelity)
